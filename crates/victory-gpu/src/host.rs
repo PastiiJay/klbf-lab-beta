@@ -7184,6 +7184,7 @@ impl Host {
     /// as frame `frame` (saved if captures are on): one whole texture of a
     /// swap chain format is copied, as before; else they are drawn one over
     /// the other ([`record_layers`]) into a window the size of the largest.
+    /// Captures precede the frame generation swap chain's own composition.
     /// `None` if nothing was shown; else, in diagnostics builds, whether the
     /// frame was black (known for a copied texture only).
     pub(crate) fn present(&self, layers: &[Layer], frame: u64) -> Option<bool> {
@@ -7260,7 +7261,9 @@ impl Host {
             // read back at once (a saved or listed frame): then a list of
             // its own, one whose last flight has finished or a new one.
             #[cfg(feature = "diagnostics")]
-            let read_now = crate::capture::wanted(frame) || crate::capture::listed(frame);
+            let save_frame = crate::capture::wanted(frame);
+            #[cfg(feature = "diagnostics")]
+            let read_now = save_frame || crate::capture::listed(frame);
             #[cfg(not(feature = "diagnostics"))]
             let read_now = false;
             let slot = if late_free_present() && !read_now {
@@ -7297,7 +7300,7 @@ impl Host {
                 list.CopyResource(&back, texture);
                 #[cfg(feature = "diagnostics")]
                 {
-                    seen.0 = crate::capture::wanted(frame)
+                    seen.0 = save_frame
                         .then(|| crate::capture::read_back(&self.device, list, texture))
                         .flatten();
                     seen.1 = if slot.is_some() { None } else { crate::capture::probe(&self.device, list, texture) };
@@ -7323,6 +7326,23 @@ impl Host {
                         record_layers(self, list, ui, &layers[1..], (width, height, format));
                     }
                     None => record_layers(self, list, &back, layers, (width, height, format)),
+                }
+                #[cfg(feature = "diagnostics")]
+                if save_frame {
+                    if ui.is_some() {
+                        tracing::info!(frame, "frame capture precedes FidelityFX composition of the separate interface plane");
+                    }
+                    list.ResourceBarrier(&[transition(
+                        &back,
+                        D3D12_RESOURCE_STATE_PRESENT,
+                        D3D12_RESOURCE_STATE_COPY_SOURCE,
+                    )]);
+                    seen.0 = crate::capture::read_back(&self.device, list, &back);
+                    list.ResourceBarrier(&[transition(
+                        &back,
+                        D3D12_RESOURCE_STATE_COPY_SOURCE,
+                        D3D12_RESOURCE_STATE_PRESENT,
+                    )]);
                 }
             }
             #[cfg(feature = "diagnostics")]
